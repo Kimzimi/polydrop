@@ -192,6 +192,13 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    // Record statistics (non-blocking)
+    fetch(`${req.nextUrl.origin}/api/stats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ addressCount: addresses.length })
+    }).catch(() => {}) // Silently fail if stats recording fails
+
     // Process each address
     const results = await Promise.all(
       addresses.map(async (address: string) => {
