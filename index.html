@@ -14,6 +14,7 @@
 <body class="gradient-bg min-h-screen">
     <div class="container mx-auto px-4 py-8">
         <div class="text-center mb-10">
+            <img src="polydrop_logo.png" alt="PolyDrop Logo" class="mx-auto mb-6" style="width: 180px; height: 180px;">
             <h1 class="text-5xl font-bold text-white mb-4">
                 Polymarket $POLY Airdrop Estimator
             </h1>
@@ -62,7 +63,7 @@
     </div>
 
     <script>
-        function analyzeWallets() {
+        async function analyzeWallets() {
             const addressInput = document.getElementById('addresses').value;
             const addresses = addressInput.split(/[\n,]+/)
                 .map(addr => addr.trim())
@@ -73,6 +74,11 @@
                 return;
             }
 
+            // Show loading state
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.classList.remove('hidden');
+            resultsDiv.innerHTML = '<div class="text-center text-white text-xl">Loading real data from Polymarket...</div>';
+
             // Send stats to backend (non-blocking)
             fetch('https://polydrop.fun/api/stats', {
                 method: 'POST',
@@ -80,36 +86,328 @@
                 body: JSON.stringify({ addressCount: addresses.length })
             }).catch(() => {}); // Silently fail
 
-            // Generate sample data for demo
-            const results = addresses.map(address => generateSampleData(address));
+            // Fetch real data from Polymarket for each address
+            const results = await Promise.all(
+                addresses.map(address => fetchRealData(address))
+            );
+
             displayResults(results);
         }
 
-        function generateSampleData(address) {
-            const tiers = ['S', 'A', 'B', 'C'];
-            const tier = tiers[Math.floor(Math.random() * tiers.length)];
-            const volume = Math.floor(Math.random() * 100000) + 1000;
-            const pnl = Math.floor(Math.random() * 5000) - 1000;
-            const activeDays = Math.floor(Math.random() * 90) + 10;
-            const marketsTraded = Math.floor(Math.random() * 20) + 3;
-            const percentile = tier === 'S' ? 99 : tier === 'A' ? 95 : tier === 'B' ? 80 : 60;
+        async function fetchRealData(address) {
+            try {
+                // Fetch user activity from Polymarket
+                const trades = await fetchUserActivity(address);
+                const metrics = calculateMetrics(trades);
+                const airdropEstimate = estimateAirdrop(metrics);
+
+                return {
+                    address: address,
+                    tier: airdropEstimate.estimatedTier,
+                    volume: metrics.totalVolume,
+                    pnl: metrics.pnl,
+                    activeDays: metrics.activeDays,
+                    marketsTraded: metrics.uniqueMarkets,
+                    percentile: airdropEstimate.percentile,
+                    estimatedMin: airdropEstimate.estimatedAllocation.min,
+                    estimatedMax: airdropEstimate.estimatedAllocation.max,
+                    suggestions: generateSuggestions(metrics)
+                };
+            } catch (error) {
+                console.error('Error fetching data for', address, error);
+                return {
+                    address: address,
+                    tier: 'None',
+                    volume: 0,
+                    pnl: 0,
+                    activeDays: 0,
+                    marketsTraded: 0,
+                    percentile: 0,
+                    estimatedMin: 0,
+                    estimatedMax: 0,
+                    suggestions: ['Unable to fetch data - please check wallet address']
+                };
+            }
+        }
+
+        async function fetchUserActivity(walletAddress) {
+            const allTrades = [];
+            let offset = 0;
+            const limit = 500;
+
+            // ดึงข้อมูลทั้งหมดไม่จำกัด เพื่อความแม่นยำ
+            while (true) {
+                try {
+                    const url = `https://data-api.polymarket.com/activity?user=${walletAddress}&limit=${limit}&offset=${offset}&type=TRADE&sortBy=TIMESTAMP&sortDirection=DESC`;
+
+                    const response = await fetch(url, {
+                        headers: { 'Accept': 'application/json' },
+                        signal: AbortSignal.timeout(30000)
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 404) break;
+                        throw new Error(`API responded with status: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    if (!Array.isArray(data) || data.length === 0) break;
+
+                    allTrades.push(...data);
+
+                    // Update progress
+                    const resultsDiv = document.getElementById('results');
+                    resultsDiv.innerHTML = `<div class="text-center text-white text-xl">
+                        <div class="mb-2">Fetching accurate data from Polymarket...</div>
+                        <div class="text-lg">${allTrades.length} trades loaded</div>
+                        <div class="text-sm text-gray-300 mt-2">Please wait, this ensures 100% accuracy</div>
+                    </div>`;
+
+                    if (data.length < limit) break;
+
+                    offset += limit;
+                } catch (error) {
+                    console.error(`Error fetching trades at offset ${offset}:`, error);
+                    if (allTrades.length > 0) break;
+                    throw error;
+                }
+            }
+
+            return allTrades;
+        }
+
+        function calculateMetrics(trades) {
+            if (!trades || trades.length === 0) {
+                return {
+                    totalVolume: 0,
+                    pnl: 0,
+                    activeDays: 0,
+                    uniqueMarkets: 0,
+                    totalTrades: 0,
+                    closedPositions: 0,
+                    consistency: 0
+                };
+            }
+
+            let totalVolume = 0;
+            const activeDaysSet = new Set();
+            const uniqueMarketsSet = new Set();
+            const positions = {};
+
+            trades.forEach(trade => {
+                const tradeVolume = trade.usdcSize || (trade.size * trade.price);
+                totalVolume += tradeVolume;
+
+                const date = new Date(trade.timestamp * 1000).toISOString().split('T')[0];
+                activeDaysSet.add(date);
+                uniqueMarketsSet.add(trade.conditionId);
+
+                const positionKey = `${trade.conditionId}-${trade.outcomeIndex}`;
+                if (!positions[positionKey]) {
+                    positions[positionKey] = { buys: [], sells: [] };
+                }
+
+                if (trade.side === 'BUY') {
+                    positions[positionKey].buys.push(trade);
+                } else {
+                    positions[positionKey].sells.push(trade);
+                }
+            });
+
+            // Calculate PNL using FIFO (รวมทั้ง realized และ unrealized)
+            let totalPnl = 0;
+            let realizedPnl = 0;
+            let unrealizedPnl = 0;
+            let closedPositions = 0;
+
+            for (const positionKey in positions) {
+                const { buys, sells } = positions[positionKey];
+                buys.sort((a, b) => a.timestamp - b.timestamp);
+                sells.sort((a, b) => a.timestamp - b.timestamp);
+
+                let buyIndex = 0;
+                let remainingBuySize = buys[buyIndex]?.size || 0;
+                let positionPnl = 0;
+
+                // Calculate realized PNL from matched trades
+                for (const sell of sells) {
+                    let remainingSellSize = sell.size;
+
+                    while (remainingSellSize > 0 && buyIndex < buys.length) {
+                        const buy = buys[buyIndex];
+
+                        if (remainingBuySize === 0) {
+                            buyIndex++;
+                            if (buyIndex < buys.length) {
+                                remainingBuySize = buys[buyIndex].size;
+                            }
+                            continue;
+                        }
+
+                        const matchedSize = Math.min(remainingSellSize, remainingBuySize);
+                        const profit = (sell.price - buy.price) * matchedSize;
+
+                        positionPnl += profit;
+                        realizedPnl += profit;
+                        remainingSellSize -= matchedSize;
+                        remainingBuySize -= matchedSize;
+                    }
+                }
+
+                // Calculate unrealized PNL for remaining open positions
+                const totalBuySize = buys.reduce((sum, b) => sum + b.size, 0);
+                const totalSellSize = sells.reduce((sum, s) => sum + s.size, 0);
+                const openSize = totalBuySize - totalSellSize;
+
+                if (openSize > 0.0001) {
+                    // มี position ที่ยังเปิดอยู่ - ประมาณ unrealized PNL
+                    // ใช้ราคาล่าสุดเป็นราคา mark-to-market (ราคา sell ล่าสุด)
+                    const lastPrice = sells.length > 0 ? sells[sells.length - 1].price :
+                                     buys.length > 0 ? buys[buys.length - 1].price : 0;
+
+                    // คำนวณ weighted average buy price สำหรับ position ที่เหลือ
+                    let totalCost = 0;
+                    let totalSize = 0;
+                    let tempBuyIndex = buyIndex;
+                    let tempRemaining = remainingBuySize;
+
+                    while (totalSize < openSize && tempBuyIndex < buys.length) {
+                        const buy = buys[tempBuyIndex];
+                        if (tempRemaining === 0) {
+                            tempBuyIndex++;
+                            if (tempBuyIndex < buys.length) {
+                                tempRemaining = buys[tempBuyIndex].size;
+                            }
+                            continue;
+                        }
+
+                        const sizeToAdd = Math.min(openSize - totalSize, tempRemaining);
+                        totalCost += buy.price * sizeToAdd;
+                        totalSize += sizeToAdd;
+                        tempRemaining -= sizeToAdd;
+                    }
+
+                    const avgBuyPrice = totalSize > 0 ? totalCost / totalSize : 0;
+                    const unrealizedForPosition = (lastPrice - avgBuyPrice) * openSize;
+                    unrealizedPnl += unrealizedForPosition;
+                    positionPnl += unrealizedForPosition;
+                } else if (Math.abs(openSize) < 0.0001) {
+                    closedPositions++;
+                }
+
+                totalPnl += positionPnl;
+            }
+
+            const activeDays = activeDaysSet.size;
+            const timestamps = trades.map(t => t.timestamp).sort((a, b) => a - b);
+            const firstTrade = timestamps[0];
+            const lastTrade = timestamps[timestamps.length - 1];
+            const totalDays = Math.max(1, Math.ceil((lastTrade - firstTrade) / 86400));
+            const consistency = activeDays / totalDays;
 
             return {
-                address: address,
-                tier: tier,
-                volume: volume,
-                pnl: pnl,
-                activeDays: activeDays,
-                marketsTraded: marketsTraded,
-                percentile: percentile,
-                estimatedMin: tier === 'S' ? 5000 : tier === 'A' ? 1000 : tier === 'B' ? 500 : 100,
-                estimatedMax: tier === 'S' ? 20000 : tier === 'A' ? 5000 : tier === 'B' ? 2000 : 500,
-                suggestions: [
-                    'Increase trading volume by 20%',
-                    'Trade in more diverse markets',
-                    'Maintain daily activity for consistency'
-                ]
+                totalVolume: Math.round(totalVolume * 100) / 100,
+                pnl: Math.round(totalPnl * 100) / 100,
+                activeDays,
+                uniqueMarkets: uniqueMarketsSet.size,
+                totalTrades: trades.length,
+                closedPositions,
+                consistency: Math.round(consistency * 100) / 100
             };
+        }
+
+        function estimateAirdrop(metrics) {
+            const { totalVolume, pnl, activeDays, uniqueMarkets, totalTrades, closedPositions, consistency } = metrics;
+
+            let tier = 'None';
+            let percentile = 0;
+            let minAllocation = 0;
+            let maxAllocation = 0;
+
+            const volumeScore = Math.min(totalVolume / 100000, 1) * 40;
+            const consistencyScore = consistency * 30;
+            const diversityScore = Math.min(uniqueMarkets / 50, 1) * 15;
+            const activityScore = Math.min(totalTrades / 200, 1) * 10;
+            const pnlScore = pnl > 0 ? Math.min(pnl / 10000, 1) * 5 : 0;
+
+            const totalScore = volumeScore + consistencyScore + diversityScore + activityScore + pnlScore;
+
+            if (totalScore >= 70 && totalVolume >= 50000) {
+                tier = 'S';
+                percentile = Math.min(99, 90 + totalScore / 10);
+                minAllocation = 5000;
+                maxAllocation = 20000;
+            } else if (totalScore >= 50 && totalVolume >= 10000) {
+                tier = 'A';
+                percentile = Math.min(95, 75 + totalScore / 4);
+                minAllocation = 1000;
+                maxAllocation = 5000;
+            } else if (totalScore >= 30 && totalVolume >= 1000) {
+                tier = 'B';
+                percentile = Math.min(85, 50 + totalScore / 2);
+                minAllocation = 500;
+                maxAllocation = 2000;
+            } else if (totalVolume >= 100) {
+                tier = 'C';
+                percentile = Math.min(70, 20 + totalScore);
+                minAllocation = 100;
+                maxAllocation = 500;
+            } else {
+                percentile = Math.min(50, totalScore);
+                minAllocation = 0;
+                maxAllocation = 100;
+            }
+
+            if (pnl >= 1000 && tier !== 'None') {
+                percentile = Math.min(99.5, percentile + 3);
+                minAllocation = Math.round(minAllocation * 1.3);
+                maxAllocation = Math.round(maxAllocation * 1.3);
+            }
+
+            if (consistency < 0.2 && activeDays < 30) {
+                percentile = Math.max(0, percentile - 15);
+                minAllocation = Math.round(minAllocation * 0.7);
+                maxAllocation = Math.round(maxAllocation * 0.7);
+            }
+
+            return {
+                estimatedTier: tier,
+                percentile: Math.round(percentile),
+                estimatedAllocation: {
+                    min: Math.round(minAllocation),
+                    max: Math.round(maxAllocation)
+                }
+            };
+        }
+
+        function generateSuggestions(metrics) {
+            const suggestions = [];
+
+            if (metrics.totalVolume < 1000) {
+                suggestions.push(`Increase trading volume to at least $1,000 (currently $${Math.round(metrics.totalVolume)})`);
+            }
+
+            if (metrics.activeDays < 30) {
+                suggestions.push(`Trade for ${30 - metrics.activeDays} more days to improve consistency`);
+            }
+
+            if (metrics.uniqueMarkets < 10) {
+                suggestions.push(`Trade in ${10 - metrics.uniqueMarkets} more markets to diversify`);
+            }
+
+            if (metrics.closedPositions < 5) {
+                suggestions.push('Close more positions to demonstrate complete trading cycles');
+            }
+
+            if (metrics.consistency < 0.3) {
+                suggestions.push('Increase trading frequency - aim for at least 3 days per week');
+            }
+
+            if (suggestions.length === 0) {
+                suggestions.push('Great job! Keep maintaining your current trading patterns.');
+            }
+
+            return suggestions;
         }
 
         function displayResults(wallets) {
