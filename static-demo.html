@@ -134,9 +134,10 @@
             const allTrades = [];
             let offset = 0;
             const limit = 500;
+            const maxTrades = 2000; // จำกัด 2,000 trades เพื่อความเร็ว
 
-            // ดึงข้อมูลทั้งหมดไม่จำกัด เพื่อความแม่นยำ
-            while (true) {
+            // ดึงข้อมูลล่าสุด 2,000 trades
+            while (allTrades.length < maxTrades) {
                 try {
                     const url = `https://data-api.polymarket.com/activity?user=${walletAddress}&limit=${limit}&offset=${offset}&type=TRADE&sortBy=TIMESTAMP&sortDirection=DESC`;
 
@@ -157,10 +158,13 @@
 
                     // Update progress
                     const resultsDiv = document.getElementById('results');
+                    const percentage = Math.round((allTrades.length / maxTrades) * 100);
                     resultsDiv.innerHTML = `<div class="text-center text-white text-xl">
-                        <div class="mb-2">Fetching accurate data from Polymarket...</div>
+                        <div class="mb-2">Analyzing trading history...</div>
                         <div class="text-lg">${allTrades.length} trades loaded</div>
-                        <div class="text-sm text-gray-300 mt-2">Please wait, this ensures 100% accuracy</div>
+                        <div class="w-full max-w-md mx-auto bg-gray-700 rounded-full h-2 mt-4">
+                            <div class="bg-gradient-to-r from-blue-400 to-purple-400 h-2 rounded-full transition-all" style="width: ${percentage}%"></div>
+                        </div>
                     </div>`;
 
                     if (data.length < limit) break;
